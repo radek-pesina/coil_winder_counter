@@ -119,34 +119,41 @@ void loop()
   }
   else {
     // Normal counting mode
-    // Handle sensor reading
+    // Handle sensor reading with millis-based debounce
+    static unsigned long lastSensorTriggerTime = 0;
+    const unsigned long sensorDebounceTime = 120; // ms, adjust as needed
     int sensorState = digitalRead(sensorPin);
     if (sensorState == LOW && lastSensorState == HIGH) {
-      if (currentCount > 0) {
-        currentCount--;
-        updateDisplay();
-        printf("Coils remaining: %lu\n", currentCount);
+      // Only count if enough time has passed since last trigger
+      if (millis() - lastSensorTriggerTime > sensorDebounceTime) {
+        if (currentCount > 0) {
+          currentCount--;
+          updateDisplay();
+          printf("Coils remaining: %lu\n", currentCount);
 
-        // Activate buzzer when count reaches zero
-        if (currentCount == 0) {
-          buzzerActive = true;
+          // Activate buzzer when count reaches zero
+          if (currentCount == 0) {
+            buzzerActive = true;
+          }
         }
+        lastSensorTriggerTime = millis();
       }
-      delay(50); // debounce / slow polling
     }
     lastSensorState = sensorState;
 
     // Handle buzzer
     if (buzzerActive) {
-      // Beep pattern: 500ms on, 500ms off
-      digitalWrite(buzzerPin, (millis() / 500) % 2 == 0 ? HIGH : LOW);
+      // Use tone() for a continuous audible buzz at 1kHz
+      tone(buzzerPin, 1000); // 1kHz
 
       // Check for button press to stop buzzer
       if (buttonState == LOW && lastButtonState == HIGH) {
         buzzerActive = false;
-        digitalWrite(buzzerPin, LOW);
+        noTone(buzzerPin);
         delay(300); // debounce
       }
+    } else {
+      noTone(buzzerPin); // Ensure buzzer is off when not active
     }
   }
 
