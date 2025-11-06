@@ -48,9 +48,17 @@ bool buzzerActive = false;    // buzzer state
 int lastSensorState = HIGH;   // for edge detection
 int lastButtonState = HIGH;   // for button edge detection
 unsigned long buttonPressStartTime = 0;  // for long press detection
+unsigned long lastButtonActivityTime = 0;  // for tracking inactivity period
 const unsigned long LONG_PRESS_TIME = 2000;  // 2 seconds for acceleration
+const unsigned long INACTIVITY_TIME = 5000;  // 5 seconds of no button activity before starting
 const unsigned long FAST_INCREMENT_INTERVAL = 200;  // 5 times per second (1000/5=200ms)
+const uint8_t PULSES_PER_DECREMENT = 1; // number of sensor pulses per coil decrement
 unsigned long lastFastIncrementTime = 0;
+// Prevent multiple decrements when stopped on sensor or noisy signal
+const unsigned long MIN_DECREMENT_INTERVAL = 300; // ms; ignore decrements faster than this
+unsigned long lastDecrementTime = 0;
+// Sensor priming flag (cleared when returning to target-set mode)
+bool sensorPrimed = false;
 
 // Setup printf() support on Arduino Uno
 int serial_putchar(char c, FILE *)
@@ -83,73 +91,126 @@ void loop()
   // Handle button input for target setting or buzzer reset
   int buttonState = digitalRead(buttonPin);
 
-  if (settingTarget) {
+  if (settingTarget)
+  {
     // Target setting mode
-    if (buttonState == LOW && lastButtonState == HIGH) {
+    if (buttonState == LOW && lastButtonState == HIGH)
+    {
       // Button just pressed
       buttonPressStartTime = millis();
+      lastButtonActivityTime = millis();
       targetCount++;
       updateDisplay();
       delay(50); // Initial debounce
     }
-    else if (buttonState == LOW && (millis() - buttonPressStartTime) > LONG_PRESS_TIME) {
+    else if (buttonState == LOW && (millis() - buttonPressStartTime) > LONG_PRESS_TIME)
+    {
       // Long press - fast increment
-      if (millis() - lastFastIncrementTime >= FAST_INCREMENT_INTERVAL) {
+      if (millis() - lastFastIncrementTime >= FAST_INCREMENT_INTERVAL)
+      {
         targetCount += 5;
         updateDisplay();
         lastFastIncrementTime = millis();
+        lastButtonActivityTime = millis(); // Update activity time during fast increment
       }
     }
-    else if (buttonState == HIGH && lastButtonState == LOW) {
+    else if (buttonState == HIGH && lastButtonState == LOW)
+    {
       // Button released
-      if (millis() - buttonPressStartTime > LONG_PRESS_TIME) {
+      lastButtonActivityTime = millis(); // Update activity time on release
+      if (millis() - buttonPressStartTime > LONG_PRESS_TIME)
+      {
         delay(500); // Additional delay after fast increment
       }
     }
 
-    // Exit target setting mode after 3 seconds of no button activity
-    if (buttonState == HIGH && lastButtonState == HIGH &&
-        targetCount > 0 && millis() - buttonPressStartTime > 3000) {
+    // Exit target setting mode after INACTIVITY_TIME of no button activity
+    if (buttonState == HIGH && targetCount > 0 &&
+        (millis() - lastButtonActivityTime) > INACTIVITY_TIME)
+        {
       settingTarget = false;
       currentCount = targetCount;
       lcd.clear();
       lcd.print("Winding:");
       updateDisplay();
+      printf("Target set: %lu\n", targetCount);
     }
   }
-  else {
+  else
+  {
     // Normal counting mode
-    // Handle sensor reading with millis-based debounce
+    // Simpler falling-edge based pulse-pair detector (works with your sensor: steady HIGH, two flashes per pass)
     static unsigned long lastSensorTriggerTime = 0;
-    const unsigned long sensorDebounceTime = 120; // ms, adjust as needed
+    static uint8_t pulseCount = 0;  // Count falling-edge pulses before decrementing
+    const unsigned long sensorDebounceTime = 50; // ms debounce for edges
     int sensorState = digitalRead(sensorPin);
-    if (sensorState == LOW && lastSensorState == HIGH) {
-      // Only count if enough time has passed since last trigger
-      if (millis() - lastSensorTriggerTime > sensorDebounceTime) {
-        if (currentCount > 0) {
-          currentCount--;
-          updateDisplay();
-          printf("Coils remaining: %lu\n", currentCount);
+    unsigned long currentTime = millis();
 
-          // Activate buzzer when count reaches zero
-          if (currentCount == 0) {
-            buzzerActive = true;
+    // Detect falling edge (HIGH -> LOW)
+    if (sensorState == LOW && lastSensorState == HIGH)
+    {
+      pulseCount++;
+      lastSensorTriggerTime = currentTime;
+      printf("Pulse detected (count=%u)\n", pulseCount);
+
+      if (pulseCount >= PULSES_PER_DECREMENT)
+      {
+        // PULSES_PER_DECREMENT falling edges = one magnet pass
+        if (currentTime - lastDecrementTime > MIN_DECREMENT_INTERVAL)
+        {
+          if (currentCount > 0)
+          {
+            currentCount--;
+            updateDisplay();
+            printf("Coils remaining: %lu (pulse pair)\n", currentCount);
+            if (currentCount == 0)
+            {
+              buzzerActive = true;
+            }
           }
+          lastDecrementTime = currentTime;
         }
-        lastSensorTriggerTime = millis();
+        else
+        {
+          printf("Ignored pulse pair (too fast): %lums since last decrement\n", currentTime - lastDecrementTime);
+        }
+        pulseCount = 0;
       }
     }
     lastSensorState = sensorState;
 
-    // Handle buzzer
-    if (buzzerActive) {
+    // Reset pulse counter if pulses are too far apart (prevent stale partial counts)
+    if (currentTime - lastSensorTriggerTime > 2000)
+    {
+      pulseCount = 0;
+    }
+
+    // Handle buzzer and reset functionality
+    if (buzzerActive)
+    {
       // Use tone() for a continuous audible buzz at 1kHz
       tone(buzzerPin, 1000); // 1kHz
 
-      // Check for button press to stop buzzer
-      if (buttonState == LOW && lastButtonState == HIGH) {
+      // Check for button press to stop buzzer and reset device
+      if (buttonState == LOW && lastButtonState == HIGH)
+      {
+        // Stop buzzer
         buzzerActive = false;
         noTone(buzzerPin);
+
+        // Reset to initial state
+        settingTarget = true;
+        targetCount = 0;
+        currentCount = 0;
+        lastButtonActivityTime = millis();
+        sensorPrimed = false; // ensure sensor timing will be re-initialized for the next winding
+
+        // Reset display to initial state
+        lcd.clear();
+        lcd.print("Set Target:");
+        updateDisplay();
+
+        printf("Device reset for new target\n");
         delay(300); // debounce
       }
     } else {
